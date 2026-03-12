@@ -1,0 +1,1701 @@
+IMPORTANT NOTE (STRICTLY FOLLOW):
+The input json contains "correlation_candidates", do not take this for parameterization, please ignore this.
+
+================================================================================
+URL ENCODING SAFETY RULE — PREVENT URISyntaxException
+================================================================================
+
+PURPOSE
+
+When generating JMeter HTTP samplers from HAR entries, variables inserted into
+query parameters may contain characters that are illegal in Java URI parsing
+(RFC 3986).
+
+Examples of problematic characters:
+
+    / ? : @ & = + $ , space % #
+
+These characters frequently appear in values such as:
+
+    - redirect URLs
+    - session identifiers
+    - OAuth states
+    - tokens
+    - paths like /default.aspx
+
+Java's java.net.URI parser will throw:
+
+    java.net.URISyntaxException: Illegal character in query
+
+Therefore, all dynamic values must be safely URL encoded.
+
+--------------------------------------------------------------------------------
+DETECTION RULE
+--------------------------------------------------------------------------------
+
+If a query parameter value contains a JMeter variable reference:
+
+    ${VARIABLE_NAME}
+
+The agent MUST wrap the variable using the JMeter encoding function:
+
+    ${__urlencode(${VARIABLE_NAME})}
+
+--------------------------------------------------------------------------------
+TRANSFORMATION RULE
+--------------------------------------------------------------------------------
+
+When generating query strings:
+
+Input Example:
+    https://example.com/login?sendTo=${SEND_TO}&token=${TOKEN}
+
+Correct Output:
+    https://example.com/login?sendTo=${__urlencode(${SEND_TO})}&token=${__urlencode(${TOKEN})}
+
+--------------------------------------------------------------------------------
+PARAMETER TABLE RULE (Preferred)
+--------------------------------------------------------------------------------
+
+Whenever possible, query parameters should NOT be embedded directly inside
+the URL. Instead generate them in the HTTP Request Parameters table.
+
+Example:
+
+URL:
+    https://example.com/login
+
+Parameters:
+    Name     Value
+    ----     -----
+    sendTo   ${SEND_TO}
+    token    ${TOKEN}
+
+JMeter will automatically perform URL encoding when parameters are placed
+in the parameter table.
+
+--------------------------------------------------------------------------------
+STRICT IMPLEMENTATION RULES
+--------------------------------------------------------------------------------
+
+1. If a query value contains ${VAR}, wrap it using __urlencode.
+2. Do not encode static literal values unless required.
+3. Do not double encode values.
+4. Preserve original parameter names exactly.
+5. Apply encoding only to VALUES, never to parameter names.
+6. Maintain deterministic transformation.
+
+--------------------------------------------------------------------------------
+SAFE VARIABLE EXAMPLES
+--------------------------------------------------------------------------------
+
+Redirect Path:
+    sendTo=${__urlencode(${SEND_TO})}
+
+OAuth State:
+    state=${__urlencode(${STATE})}
+
+Token:
+    token=${__urlencode(${TOKEN})}
+
+--------------------------------------------------------------------------------
+RESULT
+--------------------------------------------------------------------------------
+
+This rule guarantees that generated JMX files will not produce:
+
+    java.net.URISyntaxException
+    Illegal character in query
+
+when executed in JMeter. All dynamic parameters will be safely encoded
+before the request is executed.
+
+
+================================================================================
+Input: HAR Analysis JSON → Output: Complete Executable JMX File
+================================================================================
+
+{{HAR_Document_Details}}
+
+Before writing any HTTP Request or URL into the JMX (While generating JMX,
+Strictly keep this in memory):
+
+1. Validate the full URL according to RFC 3986 URI standards.
+2. If any query parameter contains spaces or illegal characters, they MUST
+   be URL encoded.
+
+ENCODING REQUIREMENTS
+
+    Space  →  %20
+    +      →  %2B
+    #      →  %23
+    |      →  %7C
+    {      →  %7B
+    }      →  %7D
+    "      →  %22
+
+SPECIAL RULE FOR OAUTH PARAMETERS
+
+Parameters such as:
+    - scope
+    - redirect_uri
+    - state
+    - code_challenge
+
+must ALWAYS be URL encoded if they contain spaces or special characters.
+
+Example Fix:
+
+    Incorrect:
+        scope=profile openid federationID pearsonUID
+
+    Correct:
+        scope=profile%20openid%20federationID%20pearsonUID
+
+AGENT ENFORCEMENT
+
+If an illegal character is detected in the query string:
+    - Automatically encode it
+    - Replace the original value with the encoded value
+    - Ensure the final URL can be parsed by java.net.URI
+
+
+================================================================================
+Rule Set — CSVDataSet Property Type Validation
+================================================================================
+
+Before emitting the CSVDataSet XML element, validate the property types
+against JMeter 5.6.x TestBean definitions.
+
+Mandatory property types:
+
+    delimiter        →  stringProp
+    fileEncoding     →  stringProp
+    filename         →  stringProp
+    ignoreFirstLine  →  boolProp
+    quotedData       →  boolProp
+    recycle          →  boolProp
+    stopThread       →  boolProp
+    variableNames    →  stringProp
+    shareMode        →  stringProp
+
+CRITICAL RULE
+
+The property shareMode MUST always be defined as a stringProp.
+
+Correct format:
+    <stringProp name="shareMode">shareMode.all</stringProp>
+
+Incorrect format (FORBIDDEN):
+    <boolProp name="shareMode">shareMode.all</boolProp>
+
+REASON
+
+In Apache JMeter 5.6.x, shareMode is defined as a String property in the
+CSVDataSet TestBean. Using boolProp causes runtime failure:
+
+    class java.lang.Boolean cannot be cast to class java.lang.String
+
+VALIDATION STEP
+
+Before writing the final XML, verify:
+    - shareMode uses <stringProp>
+    - no CSVDataSet string fields are emitted as <boolProp>
+    - the JMX is compatible with Apache JMeter 5.6.3
+
+
+================================================================================
+PROCESSING ORDER (Follow Exactly)
+================================================================================
+
+Execute in this sequence before writing any XML:
+
+1.  INGEST          — Parse the JSON block; build warning_map
+2.  PRE-SCAN        — Build sets S1–S9 across all entries simultaneously
+3.  CLASSIFY GROUPS — Group entries by path context tag (MOD-3); assign SC[INT] prefixes
+4.  RESOLVE ENV VARS    — Apply Rule Sets 1.1–1.4; write UDV environment group
+5.  RESOLVE QUERY VARS  — Apply Rule Set 2; write UDV query group
+6.  RESOLVE BODY VARS   — Apply Rule Set 3; write UDV body group
+7.  RESOLVE PATH ID VARS — Apply Rule Set 4; write UDV path ID group
+8.  CLASSIFY UDV vs CSV — Apply Parameter Data Source Validation Gate;
+                          separate static vars (UDV) from dynamic vars (CSV)
+9.  DEDUP UDV       — Collapse any duplicate variable names across all groups
+10. EMIT XML        — Write full JMX in structure order; run validation checklist
+11. EMIT NOTHING ELSE — No prose, markdown, or fences outside the XML
+
+
+================================================================================
+INPUT CONTRACT
+================================================================================
+
+DATA SOURCE PRIORITY
+
+    Part                                        Role
+    ----                                        ----
+    JSON block                                  Authoritative. Parse this
+                                                exclusively for all values.
+    Markdown report (SECTION 1–4 +
+    EXTRACTION NOTES)                           Supplementary context only.
+                                                Never use as a data source.
+
+The authoritative array is all_entries[] inside the JSON block.
+
+--------------------------------------------------------------------------------
+ROOT-LEVEL JSON SCHEMA
+--------------------------------------------------------------------------------
+
+    {
+      extraction_meta
+      ├── source_file              → string
+      ├── extracted_at             → ISO 8601 string
+      ├── total_entries_scanned    → integer
+      ├── total_entries_processed  → integer
+      └── warnings_count           → integer
+
+      all_entries[]                → AUTHORITATIVE array of entry objects
+
+      warnings[]                   → [{ entry_index, issue }]
+    }
+
+--------------------------------------------------------------------------------
+CANONICAL ENTRY SHAPE
+--------------------------------------------------------------------------------
+
+    all_entries[N]
+    ├── index                     → integer (1-based)
+    ├── startedDateTime           → ISO 8601 | null   (informational only; NOT used in JMX)
+    ├── time                      → float (total elapsed ms)
+    ├── request
+    │   ├── method                → string
+    │   ├── url                   → string (always absolute)
+    │   ├── httpVersion           → string | null
+    │   ├── queryString[]         → [{name, value}] | []
+    │   ├── headers[]             → [{name, value}] | []
+    │   ├── cookies[]             → [{name, value}] | []
+    │   └── postData
+    │       ├── mimeType          → string | null
+    │       ├── text              → string | null
+    │       └── params[]          → [{name, value}] | []
+    └── response
+        ├── status                → integer
+        ├── statusText            → string | null
+        ├── headers[]             → [{name, value}] | []
+        ├── cookies[]             → [{name, value}] | []
+        └── content
+            ├── mimeType          → string | null
+            ├── size              → integer | null
+            ├── text              → string | null
+            └── encoding          → string | null   (informational only; NOT used in JMX)
+
+--------------------------------------------------------------------------------
+NULL / EMPTY FIELD RESOLUTION TABLE
+--------------------------------------------------------------------------------
+
+Apply this table before any rule. Never infer a value not in this table.
+
+    Field State                                           Action
+    -----------                                           ------
+    queryString is [] or null                             No query params — omit arguments block
+    postData.mimeType, .text, and .params all null/empty  No body — omit body section entirely
+    postData.params[] is non-empty                        Use params[]; IGNORE postData.text
+    postData.params is [] AND postData.text is non-null
+      and non-empty                                       Use postData.text as raw body
+    postData.text is "" AND postData.params is []         No body — omit body section entirely
+    response.content.text is null                         No response body — skip all body assertions
+    response.content.mimeType is null                     Skip content-type assertion
+    timings.wait is null, missing, negative, or -1        Use timings.total; if also null/negative/-1
+                                                          → use 0
+    httpVersion is null                                   Omit — do not set in sampler
+    startedDateTime is null                               Skip — not used in JMX
+
+NOTE: -1 sentinel: Any timings.* value of -1 means "not applicable"
+(e.g., reused connection). Treat as null for all fallback chains.
+
+
+================================================================================
+PHASE 0 — PRE-SCAN
+================================================================================
+
+Run once across all entries before any rule. Never re-read individual
+entries per rule.
+
+--------------------------------------------------------------------------------
+Step 0.0 — Ingest Warnings
+--------------------------------------------------------------------------------
+
+    warning_map[entry_index] = issue_string
+
+Process warned entries normally. Surface issues in the WARNINGS section of
+the Parameterization Report.
+
+--------------------------------------------------------------------------------
+Step 0.1 — Build Lookup Sets
+--------------------------------------------------------------------------------
+
+    Set   What to Collect
+    ---   ---------------
+    S1    All distinct hostnames from every request.url
+    S2    All distinct protocols from every request.url
+    S3    All distinct ports (explicit or implied) from every request.url
+    S4    All full URL paths (after host:port, before ?) — for base path detection
+    S5    All queryString[].name + value pairs, grouped by param name
+    S6    All postData.params[].name + value pairs
+    S7    All top-level JSON keys from postData.text where mimeType contains json
+    S8    All URL path segments matching ^[0-9]+$
+    S9    All URL path segments matching UUID or compact hex patterns
+
+--------------------------------------------------------------------------------
+Step 0.2 — Status 0 Entry Classification
+--------------------------------------------------------------------------------
+
+Before generating any Thread Group, scan every entry for response.status = 0.
+
+    status_zero_entries[] = all entry indexes where response.status = 0
+
+Entries in status_zero_entries[] represent failed or cancelled browser
+requests. They must be emitted as Thread Groups with enabled="false".
+See Rule Set 6.1 and the Thread Group generation rules.
+
+--------------------------------------------------------------------------------
+Step 0.3 — Redirect Entry Classification
+--------------------------------------------------------------------------------
+
+    redirect_entries[] = all entry indexes where response.status is in
+                         {301, 302, 303, 307, 308}
+
+Entries in redirect_entries[] require HTTPSampler.follow_redirects set to
+false so JMeter captures the actual redirect response code. See HTTP Request
+Sampler generation rules.
+
+--------------------------------------------------------------------------------
+Step 0.4 — Context Tag Group Classification
+--------------------------------------------------------------------------------
+
+    1. For each entry, extract path-after-BASE_PATH
+    2. Split path by "/"
+    3. Skip empty segments and version segments (^v[0-9]+$)
+    4. Skip purely numeric and UUID segments
+    5. First remaining segment = context_tag for that entry
+    6. If no valid segment found → context_tag = "DefaultAPI"
+    7. Group entries by context_tag
+    8. Assign SC[INT] prefix to each unique context_tag in order of first
+       appearance:
+         First unique tag  → SC01
+         Second unique tag → SC02
+         Third unique tag  → SC03
+         ... and so on (zero-padded, always 2+ digits)
+
+
+================================================================================
+NAMING CONVENTION (STRICTLY FOLLOW)
+================================================================================
+
+Name all Thread Groups using the following format:
+
+    SC[INT]_.Telerik_[APIName]
+
+Where:
+    - SC[INT] is a zero-padded sequential number starting from SC01
+    - _Telerik_ is a FIXED MIDDLE SEGMENT — never modify
+    - [APIName] is derived from the context tag (PascalCase)
+
+APINAME DERIVATION ALGORITHM:
+
+    1. Take the context_tag from Step 0.4
+    2. Convert to PascalCase:
+         "users"        → "Users"
+         "orders-items" → "OrdersItems"
+         "auth"         → "Auth"
+         "classroom"    → "Classroom"
+    3. If context_tag = "DefaultAPI" → use "DefaultAPI" as-is
+    4. Final result: SC01_Telerik_Users
+
+EXAMPLES:
+
+    Entry group: GET /users/{userId}, POST /users      → SC01_Telerik_Users
+    Entry group: POST /orders, GET /orders/{orderId}   → SC02_Telerik_Orders
+    Entry group: DELETE /auth/token, POST /auth/login  → SC03_Telerik_Auth
+    Entry group: GET /                                 → SC04_Telerik_DefaultAPI
+
+HARD RULE: The sequential number must never reset. Even if two context tags
+produce the same APIName, each Thread Group gets its own unique SC[INT]
+prefix.
+
+
+================================================================================
+PARAMETER DATA SOURCE VALIDATION GATE
+================================================================================
+
+Before creating ANY User Defined Variables or CSV Data Set Config elements,
+perform this classification validation to determine the correct data source
+for every parameter found in the HAR entries.
+
+--------------------------------------------------------------------------------
+Step 1: Collect All Parameters
+--------------------------------------------------------------------------------
+
+Gather every parameter across ALL entries:
+    - Path parameters (numeric/UUID segments from paths)
+    - Query parameters from queryString[]
+    - Header parameters from request.headers[]
+    - Body parameters from postData.params[] or postData.text JSON keys
+
+--------------------------------------------------------------------------------
+Step 2: Classify Each Parameter
+--------------------------------------------------------------------------------
+
+ASSIGN TO USER DEFINED VARIABLES (UDV) IF:
+    - The parameter is infrastructure/environment-related:
+      PROTOCOL, SERVER, BASE_PATH, HOST, PORT
+    - The parameter controls thread execution: THREADS, RAMPUP, LOOPS
+    - The parameter is a static API credential or key:
+      apiKey, X-API-Key, Authorization, token (static)
+    - The parameter has a single fixed default value that does not change
+      between iterations: Content-Type, Accept, apiVersion
+    - The parameter is a common pagination default:
+      page, limit, offset, pageSize
+    - The parameter appears in ONLY ONE operation and has a single
+      sensible default
+
+ASSIGN TO CSV DATA SET CONFIG IF:
+    - The parameter represents user-specific or entity-specific test data:
+      userId, username, email, password
+    - The parameter is an entity identifier that varies per iteration:
+      orderId, productId, transactionId
+    - The parameter is a request body field that should vary per test row:
+      name, email, age, address
+    - The parameter appears across MULTIPLE operations and needs different
+      values per iteration
+    - The parameter requires more than one distinct test value for
+      meaningful coverage
+
+--------------------------------------------------------------------------------
+Step 3: Produce Internal Classification Table
+--------------------------------------------------------------------------------
+
+Before generating any JMX elements, produce this classification table
+internally and validate it:
+
+    Parameter Name   Source           Classification   Data Source   Default Value
+    --------------   ------           --------------   -----------   -------------
+    PROTOCOL         infrastructure   static           UDV           https
+    HOST             infrastructure   static           UDV           api.example.com
+    PORT             infrastructure   static           UDV           443
+    BASE_PATH        infrastructure   static           UDV           /api/v1
+    THREADS          execution        static           UDV           1
+    RAMPUP           execution        static           UDV           1
+    LOOPS            execution        static           UDV           1
+    page             query param      pagination       UDV           1
+    limit            query param      pagination       UDV           20
+    userId           path param       entity id        CSV           user001
+    username         body param       test data        CSV           testuser
+    email            body param       test data        CSV           test@example.com
+    orderId          path param       entity id        CSV           order001
+
+NOTE: The above table is an EXAMPLE only. The actual table must be built
+from real parameters found in the HAR entries.
+
+--------------------------------------------------------------------------------
+Step 4: Validate Before Generating
+--------------------------------------------------------------------------------
+
+Before writing any XML, confirm ALL of the following:
+    [ ] No parameter appears in BOTH UDV and CSV
+    [ ] Every parameter is assigned to exactly one data source
+    [ ] UDV contains ONLY static/infrastructure/default parameters
+    [ ] CSV contains ONLY dynamic/test-data/entity-specific parameters
+    [ ] CSV variableNames string lists ALL and ONLY CSV-classified parameters
+    [ ] UDV block contains ALL and ONLY UDV-classified parameters
+
+--------------------------------------------------------------------------------
+Step 5: Conflict Resolution
+--------------------------------------------------------------------------------
+
+If a parameter is ambiguous, apply this tiebreaker:
+    - Does the parameter need different values per virtual user or
+      iteration? → CSV
+    - Does the parameter stay the same for the entire test run? → UDV
+    - When still uncertain → Default to UDV (safer; can be promoted to
+      CSV later)
+
+--------------------------------------------------------------------------------
+Step 6: Generate JMX Elements
+--------------------------------------------------------------------------------
+
+Only after Steps 1–5 are fully completed and validated, proceed to generate
+UDV and CSV elements.
+
+FAILURE MODE: If this validation gate is not completed before JMX generation,
+the output is considered INVALID. Classification must be redone before
+proceeding to any XML generation.
+
+
+================================================================================
+RULE SET 1 — ENVIRONMENT VARIABLE EXTRACTION
+================================================================================
+
+--------------------------------------------------------------------------------
+1.1 Protocol
+--------------------------------------------------------------------------------
+
+    Condition                    Variable                   UDV Default
+    ---------                    --------                   -----------
+    Single distinct protocol     ${PROTOCOL}                Exact value
+    Multiple distinct protocols  ${PROTOCOL_1},             Exact values in order
+                                 ${PROTOCOL_2}, …           of first appearance
+
+HARD RULE: Every HTTPSampler.protocol must use the variable. Raw protocol
+strings (http, https) are FORBIDDEN in sampler elements.
+
+--------------------------------------------------------------------------------
+1.2 Hostname
+--------------------------------------------------------------------------------
+
+    Condition              Variable                    UDV Default
+    ---------              --------                    -----------
+    Single hostname        ${HOST}                     Exact hostname
+    Multiple hostnames     Named by context (below)    Exact hostnames
+
+Multi-host naming (apply in order; first match wins):
+
+    Path Segment Signal                              Variable Name
+    -------------------                              -------------
+    auth, login, token, sso                          ${AUTH_HOST}
+    api, service, v1, v2, rest                       ${API_HOST}
+    cdn, static, assets, media                       ${CDN_HOST}
+    ws, socket, realtime                             ${WS_HOST}
+    No match                                         ${HOST_1}, ${HOST_2}, …
+                                                     (order of first appearance)
+
+HARD RULE: Every HTTPSampler.domain must use its specific host variable.
+Raw hostnames are FORBIDDEN in sampler elements.
+
+--------------------------------------------------------------------------------
+1.3 Port
+--------------------------------------------------------------------------------
+
+    Condition                     Variable                    UDV Default
+    ---------                     --------                    -----------
+    Single consistent port        ${PORT}                     Exact or implied port
+    Multiple distinct ports       ${PORT_<HOST_CONTEXT>}      Exact ports
+                                  matching host variable
+
+Implied port rules:
+    https with no explicit port → 443
+    http with no explicit port  → 80
+
+HARD RULE: Every HTTPSampler.port must use the variable. Raw port numbers
+are FORBIDDEN.
+
+--------------------------------------------------------------------------------
+1.4 Base Path
+--------------------------------------------------------------------------------
+
+Execute exactly as written:
+
+    1. Collect all full paths from S4
+    2. Split each path into segments by "/"
+    3. Compare segment-by-segment across ALL paths simultaneously
+    4. The longest prefix where ALL paths agree on every segment =
+       BASE_PATH_VALUE
+    5. If paths diverge at the first segment (or only "/" is shared) →
+       BASE_PATH_VALUE = ""
+    6. Set ${BASE_PATH} = BASE_PATH_VALUE in UDV
+    7. Each sampler path = ${BASE_PATH} + remainder after stripping
+       BASE_PATH_VALUE
+    8. If BASE_PATH_VALUE is "" → each sampler path =
+       ${BASE_PATH}/full/path
+
+Multi-tree rule: If entries clearly group into 2+ distinct path trees with
+no shared prefix, define ${BASE_PATH_1}, ${BASE_PATH_2}, etc.
+
+HARD RULE: Every sampler path must begin with ${BASE_PATH} (or the numbered
+variant). Paths that begin with a raw "/" segment are FORBIDDEN.
+
+
+================================================================================
+RULE SET 2 — QUERY PARAMETER PARAMETERIZATION
+================================================================================
+
+Apply to every entry with non-empty queryString[]. Match param names
+case-insensitively.
+
+--------------------------------------------------------------------------------
+2.1 — Universal Semantic Mappings (Apply First)
+--------------------------------------------------------------------------------
+
+    Param Name Pattern                                   Variable
+    ------------------                                   --------
+    status, state, condition                             ${FILTER_STATUS}
+    type, kind, category                                 ${FILTER_TYPE}
+    page, pagenumber, page_number                        ${PAGE_NUMBER}
+    size, pagesize, limit, count, per_page               ${PAGE_SIZE}
+    offset, skip, start                                  ${OFFSET}
+    q, query, search, keyword, term                      ${SEARCH_TERM}
+    searchcriteria, search_criteria, searchquery,
+      search_query                                       ${SEARCH_CRITERIA}
+    searchby, search_by, searchfield, search_field       ${SEARCH_BY}
+    sort, orderby, sortby, order_by                      ${SORT_BY}
+    direction, sortdir, sort_dir, order                  ${SORT_DIR}
+    from, startdate, start_date, datefrom, since         ${START_DATE}
+    to, enddate, end_date, dateto, until                 ${END_DATE}
+    userid, user_id                                      ${USER_ID}
+    customerid, customer_id                              ${CUSTOMER_ID}
+    format, responsetype, output                         ${RESPONSE_FORMAT}
+    locale, lang, language                               ${LOCALE}
+    token, access_token, apikey, api_key                 → flag AUTH_DEFERRED
+
+--------------------------------------------------------------------------------
+2.2 — Unmatched Param Naming Algorithm
+--------------------------------------------------------------------------------
+
+If a param name does not match Section 2.1:
+
+    1. Take raw param name as-is
+    2. Convert camelCase / PascalCase → UPPER_SNAKE_CASE:
+         "idWebuser"        → "ID_WEBUSER"
+         "homepageType"     → "HOMEPAGE_TYPE"
+         "daysForward"      → "DAYS_FORWARD"
+         "includeLocations" → "INCLUDE_LOCATIONS"
+    3. Replace any remaining non-alphanumeric characters with "_"
+    4. Collapse consecutive underscores to a single "_"
+    5. Strip leading and trailing underscores
+    6. Variable = "${" + result + "}"
+
+--------------------------------------------------------------------------------
+2.3 — Boolean Constant Rule
+--------------------------------------------------------------------------------
+
+If a param value is "true" or "false" AND the param is a structural on/off
+flag → Keep the LITERAL value. Do NOT parameterize.
+
+Structural flag detection: Param name contains include, exclude, enable,
+disable, allow, override, with, show, hide, use, force, or is a plain
+boolean modifier.
+
+NOTE: When in doubt → parameterize. Over-parameterization is always safer
+than under-parameterization.
+
+--------------------------------------------------------------------------------
+2.4 — Empty String Values
+--------------------------------------------------------------------------------
+
+If param value is "" → parameterize with computed variable name;
+UDV default = "".
+
+--------------------------------------------------------------------------------
+2.5 — Variable Reference in Header Values
+--------------------------------------------------------------------------------
+
+Any header value that contains a string already mapped to a UDV variable
+(by exact value match) MUST use the variable reference, not the hardcoded
+string.
+
+Algorithm:
+    For each header value:
+      For each UDV variable in the variable registry:
+        If header_value contains udv_variable.default_value as a substring:
+          Replace that substring with ${VAR_NAME}
+
+Apply this substitution after all variables are resolved but before
+emitting HeaderManager XML.
+
+
+================================================================================
+RULE SET 3 — REQUEST BODY PARAMETERIZATION
+================================================================================
+
+--------------------------------------------------------------------------------
+3.1 — Form-Urlencoded Bodies
+--------------------------------------------------------------------------------
+
+Identified by: postData.mimeType contains application/x-www-form-urlencoded.
+
+Use postData.params[]. Set postBodyRaw=false.
+Apply to each param VALUE:
+
+    Value Characteristic                               Action
+    --------------------                               ------
+    Purely numeric (^[0-9]+$)                          Parameterize → ${<PARAM_NAME_UPPER_SNAKE>}
+    UUID (with or without hyphens) or compact
+      hex >= 16 chars                                  Parameterize → ${<PARAM_NAME_UPPER_SNAKE>}
+    Boolean literal true / false                       Keep literal
+    Enum / status / categorical string                 Parameterize → ${<PARAM_NAME_UPPER_SNAKE>}
+    Human-readable name, label, free-text              Parameterize → ${<PARAM_NAME_UPPER_SNAKE>}
+    Empty string ""                                    Parameterize → variable; UDV default = ""
+
+--------------------------------------------------------------------------------
+3.2 — JSON Bodies
+--------------------------------------------------------------------------------
+
+Identified by: postData.mimeType contains application/json,
+postData.params[] is empty, and postData.text is non-null and non-empty.
+
+Use postBodyRaw=true. Parse postData.text. Recurse into nested objects
+and arrays. Apply to each field VALUE:
+
+    Value Characteristic                               Action
+    --------------------                               ------
+    Bearer token, JWT (eyJ…), client_secret,
+      password                                         → flag AUTH_DEFERRED
+    Purely numeric ID                                  Parameterize → ${<KEY_UPPER_SNAKE>}
+    UUID or compact hex >= 16 chars                    Parameterize → ${<KEY_UPPER_SNAKE>}
+    Email address                                      Parameterize → ${<KEY_UPPER_SNAKE>}
+    URL or hostname string                             Parameterize → ${<KEY_UPPER_SNAKE>_URL}
+    Timestamp or epoch integer                         Parameterize → ${TIMESTAMP} or ${__time()}
+    Enum / status / categorical string                 Parameterize → ${<KEY_UPPER_SNAKE>}
+    Human-readable free-text                           Parameterize → ${<KEY_UPPER_SNAKE>}
+    Boolean (true / false)                             Keep literal
+    null                                               Keep literal
+    0 used as a creation placeholder                   Keep literal + <!-- creation placeholder -->
+    "string" (OpenAPI schema default)                  Keep + <!-- schema default: replace
+                                                         before load test -->
+    Structural constant (fixed numeric config)         Keep literal
+
+--------------------------------------------------------------------------------
+3.3 — Empty Body Rule
+--------------------------------------------------------------------------------
+
+postData.text = "" AND postData.params = [] → NO body. Omit the body
+section entirely.
+
+--------------------------------------------------------------------------------
+3.4 — Other Body Types
+--------------------------------------------------------------------------------
+
+    mimeType                            Strategy
+    --------                            --------
+    text/xml or application/xml         postBodyRaw=true — embed postData.text as-is
+    multipart/form-data                 postBodyRaw=true — preserve boundary in
+                                        Content-Type header
+    text/plain                          postBodyRaw=true — embed as-is
+    Any other non-null mimeType         postBodyRaw=true — embed postData.text as-is
+
+
+================================================================================
+RULE SET 4 — PATH SEGMENT PARAMETERIZATION
+================================================================================
+
+--------------------------------------------------------------------------------
+4.1 — Detection Patterns
+--------------------------------------------------------------------------------
+
+    Pattern                                              Classification
+    -------                                              --------------
+    ^[0-9]+$                                             Numeric ID
+    ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-
+      [0-9a-f]{4}-[0-9a-f]{12}$ (case-insensitive)      Standard UUID
+    ^[0-9a-f]{16,}$ (case-insensitive, no hyphens)      Compact UUID / Hex ID
+
+--------------------------------------------------------------------------------
+4.2 — Variable Naming Algorithm
+--------------------------------------------------------------------------------
+
+    1. segment_before = path segment immediately preceding the dynamic segment
+    2. If segment_before matches version pattern (^v[0-9]+$):
+         segment_before = segment two positions before the dynamic segment
+    3. base = segment_before
+         → convert PascalCase/camelCase → UPPER_SNAKE_CASE
+         → replace non-alphanumeric chars with "_"
+         → strip trailing "S" only if result remains a recognisable word
+             ("users" → "user", "orders" → "order", "address" → keep)
+         → uppercase
+    4. If base is empty or unresolvable →
+         base = "RESOURCE_" + first_consumer_entry_index
+    5. suffix:
+         Numeric ID    → "_ID"
+         Standard UUID → "_UUID"
+         Compact hex   → "" (no suffix)
+    6. variable = "${" + base + suffix + "}"
+
+--------------------------------------------------------------------------------
+4.3 — Deduplication Rules
+--------------------------------------------------------------------------------
+
+    - Same value, multiple entries: All entries sharing the same dynamic
+      segment value use the SAME variable name.
+    - Same-value check: Before creating any new variable, scan the existing
+      UDV block. If a variable already has this exact value as its default
+      → REUSE that variable name.
+
+
+================================================================================
+RULE SET 5 — HEADER HANDLING
+================================================================================
+
+--------------------------------------------------------------------------------
+5.1 — Preservation Rule
+--------------------------------------------------------------------------------
+
+Copy every header from request.headers[] into the HeaderManager:
+    - Preserve original NAME CASING, original VALUE, and original ORDER
+    - NEVER drop a header
+    - NEVER fabricate a header
+
+Exception: Apply Rule 2.5 (variable substitution) to replace hardcoded
+values that match established UDV variable defaults.
+
+--------------------------------------------------------------------------------
+5.2 — Tracing Infrastructure Headers
+--------------------------------------------------------------------------------
+
+Tracing headers must be included VERBATIM — never parameterized, never
+flagged as auth.
+
+A header is a tracing header if ANY condition matches:
+
+    Condition                                            Examples
+    ---------                                            --------
+    Name matches ^(x-)?b3-(traceid|spanid|
+      parentspanid|sampled|flags)$                       Zipkin / B3
+    Name matches ^traceparent$ or ^tracestate$           W3C Trace Context
+    Name matches ^(x-)?request-id$ or
+      ^(x-)?correlation-id$                              Generic correlation
+    Name matches ^(x-)?newrelic.*$ or equals newrelic    New Relic APM
+    Name matches ^(x-)?datadog.*$                        Datadog APM
+    Name matches ^(x-)?dynatrace.*$                      Dynatrace APM
+    Name matches ^(x-)?instana.*$                        Instana APM
+    Value starts with eyJ AND name matches any
+      tracing pattern above                              JWT-encoded tracing
+                                                         payload — still tracing,
+                                                         NOT auth
+
+CRITICAL: A value beginning with eyJ does NOT make a header auth-adjacent
+if the header name matches a tracing pattern. Tracing wins.
+
+--------------------------------------------------------------------------------
+5.3 — Content-Type Auto-Injection
+--------------------------------------------------------------------------------
+
+Condition: Entry has non-null postData.mimeType AND headers[] contains no
+header named content-type (case-insensitive).
+
+    - Auto-inject one Content-Type header using postData.mimeType as value
+    - Add inline comment:
+      <!-- auto-injected: Content-Type absent from HAR headers[] -->
+
+--------------------------------------------------------------------------------
+5.4 — Auth Header Deferral
+--------------------------------------------------------------------------------
+
+Detection — any of these conditions:
+    - Header name equals authorization (case-insensitive)
+    - Header name equals x-api-key or api-key (case-insensitive)
+    - Header name ends with -token, -key, or -secret (case-insensitive)
+    - Header value starts with Bearer or Basic
+
+Action: Include header in HeaderManager with its literal HAR value.
+Add inline comment:
+
+    <!-- AUTH_DEFERRED: replace with ${AUTH_TOKEN} after Auth Agent processes -->
+
+
+================================================================================
+RULE SET 6 — RESPONSE ASSERTIONS
+================================================================================
+
+--------------------------------------------------------------------------------
+6.1 — Status Code Assertion
+--------------------------------------------------------------------------------
+
+Status 0 entries (failed/cancelled HAR requests):
+Thread Group for that entry must be emitted with enabled="false". Do NOT
+emit a status code assertion. Add this comment inside the Thread Group's
+inner <hashTree/>:
+
+    <!-- DISABLED: HAR response status is 0 — this request was failed or
+         cancelled during capture. Enable this Thread Group only after
+         verifying the endpoint and expected behaviour. -->
+
+All other entries: Add a status code assertion using response.status
+exactly as captured.
+
+    <ResponseAssertion guiclass="AssertionGui" testclass="ResponseAssertion"
+      testname="Assert HTTP <status> - <sampler_testname>" enabled="true">
+      <collectionProp name="Assertion.test_strings">
+        <stringProp name="49"><response.status></stringProp>
+      </collectionProp>
+      <stringProp name="Assertion.custom_message">Expected HTTP <status>
+        for <METHOD> <path></stringProp>
+      <stringProp name="Assertion.test_field">Assertion.response_code</stringProp>
+      <boolProp name="Assertion.assume_success">false</boolProp>
+      <intProp name="Assertion.test_type">8</intProp>
+    </ResponseAssertion>
+    <hashTree/>
+
+CRITICAL: The collectionProp name attribute must be exactly
+"Assertion.test_strings" — never "Asserion.test_strings" (missing t).
+
+--------------------------------------------------------------------------------
+6.2 — Content-Type Assertion (Conditional)
+--------------------------------------------------------------------------------
+
+Skip entirely if:
+    - response.content.mimeType is null, OR
+    - The entry is a redirect (status 3xx)
+
+CRITICAL: The collectionProp name attribute must be exactly
+"Assertion.test_strings".
+
+--------------------------------------------------------------------------------
+6.3 — JSON Body Assertion (Conditional)
+--------------------------------------------------------------------------------
+
+Add ONLY if response.content.mimeType contains json AND
+response.content.text is non-null. If either fails → skip.
+
+CRITICAL: The collectionProp name attribute must be exactly
+"Assertion.test_strings".
+
+
+================================================================================
+RULE SET 7 — CONSTANT TIMER
+================================================================================
+
+Use timings.wait (rounded to nearest integer ms) as per-sampler think time.
+
+Fallback chain: timings.wait → timings.total → 0
+
+Treat null, missing, negative, or -1 as "not available" → proceed to
+next fallback.
+
+    <!-- Timing: entry <N> — wait=<wait>ms | total=<total>ms -->
+    <ConstantTimer guiclass="ConstantTimerGui" testclass="ConstantTimer"
+      testname="Think Time - <sampler_testname>" enabled="true">
+      <stringProp name="ConstantTimer.delay">
+        ${__P(THINK_TIME,<rounded_wait>)}
+      </stringProp>
+    </ConstantTimer>
+    <hashTree/>
+
+The ${__P(THINK_TIME,<default>)} pattern allows global think time override
+via -JTHINK_TIME=<ms> at run time.
+
+
+================================================================================
+JMX ELEMENT GENERATION
+================================================================================
+
+Generate elements in this EXACT ORDER for each Thread Group and its samplers.
+
+--------------------------------------------------------------------------------
+A. Thread Group
+--------------------------------------------------------------------------------
+
+    <!-- ═══ SC[INT]_Telerik_[APIName] ═══ -->
+    <ThreadGroup guiclass="ThreadGroupGui" testclass="ThreadGroup"
+      testname="SC[INT]_Telerik_[APIName]" enabled="<true|false>">
+      <stringProp name="ThreadGroup.num_threads">${THREADS}</stringProp>
+      <stringProp name="ThreadGroup.ramp_time">${RAMPUP}</stringProp>
+      <boolProp name="ThreadGroup.same_user_on_next_iteration">true</boolProp>
+      <stringProp name="ThreadGroup.on_sample_error">continue</stringProp>
+      <elementProp name="ThreadGroup.main_controller"
+        elementType="LoopController" guiclass="LoopControlPanel"
+        testclass="LoopController" testname="Loop Controller" enabled="true">
+        <boolProp name="LoopController.continue_forever">false</boolProp>
+        <stringProp name="LoopController.loops">${LOOPS}</stringProp>
+      </elementProp>
+      <boolProp name="ThreadGroup.scheduler">false</boolProp>
+      <stringProp name="ThreadGroup.duration"></stringProp>
+      <stringProp name="ThreadGroup.delay"></stringProp>
+    </ThreadGroup>
+
+enabled attribute rule:
+    - All entries in the group have response.status = 0 → enabled="false"
+    - All other groups → enabled="true"
+
+--------------------------------------------------------------------------------
+B. HTTP Request Sampler
+--------------------------------------------------------------------------------
+
+follow_redirects rule:
+    - response.status is in {301, 302, 303, 307, 308} →
+      follow_redirects = false
+    - All other statuses → follow_redirects = true
+
+Sampler testname format: [METHOD] [path_with_variables]
+Examples:
+    GET /users/${USER_ID}
+    POST /orders
+    DELETE /auth/token
+
+    <HTTPSamplerProxy guiclass="HttpTestSampleGui" testclass="HTTPSamplerProxy"
+      testname="<METHOD> <full_path_with_variables>" enabled="true">
+      <stringProp name="HTTPSampler.protocol">${PROTOCOL}</stringProp>
+      <stringProp name="HTTPSampler.domain">${HOST}</stringProp>
+      <stringProp name="HTTPSampler.port">${PORT}</stringProp>
+      <stringProp name="HTTPSampler.path"><constructed_path></stringProp>
+      <stringProp name="HTTPSampler.method"><METHOD></stringProp>
+      <boolProp name="HTTPSampler.follow_redirects"><true|false per rule above></boolProp>
+      <boolProp name="HTTPSampler.auto_redirects">false</boolProp>
+      <boolProp name="HTTPSampler.use_keepalive">true</boolProp>
+      <boolProp name="HTTPSampler.DO_MULTIPART_POST">false</boolProp>
+      ... body section per Rule Set 3 ...
+    </HTTPSamplerProxy>
+
+Body routing decision table:
+
+    postData.mimeType                        postBodyRaw   Body Content
+    -----------------                        -----------   ------------
+    contains application/x-www-form-
+      urlencoded                             false         One HTTPArgument per
+                                                           postData.params[] entry
+    contains application/json               true          Parameterized postData.text
+                                                           as single Argument.value
+    contains text/xml or application/xml    true          postData.text as-is
+    contains multipart/form-data            true          postData.text as-is
+    Any other non-null mimeType             true          postData.text as-is
+    null or empty body per Rule 3.3         omit          No body section
+
+--------------------------------------------------------------------------------
+C. HTTP Header Manager
+--------------------------------------------------------------------------------
+
+    <HeaderManager guiclass="HeaderPanel" testclass="HeaderManager"
+      testname="HTTP Header Manager - <sampler_testname>" enabled="true">
+      <collectionProp name="HeaderManager.headers">
+        <!-- one elementProp per header from request.headers[],
+             original order -->
+        <!-- variable substitution applied per Rule 2.5 before writing
+             values -->
+        <!-- auto-injected Content-Type if applicable per Rule 5.3 -->
+      </collectionProp>
+    </HeaderManager>
+    <hashTree/>
+
+--------------------------------------------------------------------------------
+D. Cookie Manager (Test Plan Level)
+--------------------------------------------------------------------------------
+
+Always add one CookieManager at the test plan level, immediately after the
+UDV <hashTree/> and CSVDataSet <hashTree/>.
+
+    <CookieManager guiclass="CookiePanel" testclass="CookieManager"
+      testname="HTTP Cookie Manager" enabled="true">
+      <collectionProp name="CookieManager.cookies"/>
+      <boolProp name="CookieManager.clearEachIteration">false</boolProp>
+      <stringProp name="CookieManager.policy">rfc2109</stringProp>
+      <stringProp name="CookieManager.implementation">HC4CookieHandler</stringProp>
+    </CookieManager>
+    <hashTree/>
+
+Add per-sampler CookieManager elements ONLY IF request.cookies[] is
+non-empty AND cookies are not already managed by the plan-level manager.
+
+--------------------------------------------------------------------------------
+E. Response Assertion — Status Code (Rule Set 6.1)
+--------------------------------------------------------------------------------
+
+Present for all non-status-0 entries.
+
+--------------------------------------------------------------------------------
+F. Response Assertion — Content-Type (Rule Set 6.2)
+--------------------------------------------------------------------------------
+
+Conditional. Omit if response.content.mimeType is null or if
+response.status is 3xx.
+
+--------------------------------------------------------------------------------
+G. Response Assertion — JSON Body (Rule Set 6.3)
+--------------------------------------------------------------------------------
+
+Conditional. Omit if JSON conditions are not met.
+
+--------------------------------------------------------------------------------
+H. Constant Timer (Rule Set 7)
+--------------------------------------------------------------------------------
+
+Always present, one per sampler entry.
+
+
+================================================================================
+USER DEFINED VARIABLES (UDV) BLOCK
+================================================================================
+
+Place as the FIRST ELEMENT inside the Test Plan's inner hashTree.
+
+TestPlan testname derivation:
+    source_file → strip extension → replace non-alphanumeric with spaces
+    → Title-Case → append " Test Plan"
+    Example: "orders_api.har" → "Orders Api Test Plan"
+
+    <Arguments guiclass="ArgumentsPanel" testclass="Arguments"
+      testname="User Defined Variables" enabled="true">
+      <collectionProp name="Arguments.arguments">
+
+        <!-- === THREAD CONFIGURATION VARIABLES === -->
+        <elementProp name="THREADS" elementType="Argument">
+          <stringProp name="Argument.name">THREADS</stringProp>
+          <stringProp name="Argument.value">1</stringProp>
+          <stringProp name="Argument.metadata">=</stringProp>
+          <stringProp name="Argument.desc">Number of virtual users per
+            Thread Group</stringProp>
+        </elementProp>
+
+        <elementProp name="RAMPUP" elementType="Argument">
+          <stringProp name="Argument.name">RAMPUP</stringProp>
+          <stringProp name="Argument.value">1</stringProp>
+          <stringProp name="Argument.metadata">=</stringProp>
+          <stringProp name="Argument.desc">Ramp-up period in seconds</stringProp>
+        </elementProp>
+
+        <elementProp name="LOOPS" elementType="Argument">
+          <stringProp name="Argument.name">LOOPS</stringProp>
+          <stringProp name="Argument.value">1</stringProp>
+          <stringProp name="Argument.metadata">=</stringProp>
+          <stringProp name="Argument.desc">Number of loop iterations per
+            Thread Group</stringProp>
+        </elementProp>
+
+        <!-- === ENVIRONMENT VARIABLES === -->
+        <!-- PROTOCOL, HOST (or named variants), PORT (or named variants),
+             BASE_PATH -->
+        <!-- Minimum 4 variables — always present -->
+
+        <!-- === QUERY / FILTER VARIABLES === -->
+        <!-- Variables from queryString[] parameterization — omit group
+             if none detected -->
+
+        <!-- === BODY / FORM VARIABLES === -->
+        <!-- Variables from postData parameterization — omit group if
+             none detected -->
+
+        <!-- === PATH ID VARIABLES === -->
+        <!-- Variables from Rule Set 4 — omit group if none detected -->
+
+      </collectionProp>
+    </Arguments>
+    <hashTree/>
+
+UDV element format:
+
+    <elementProp name="<VAR_NAME>" elementType="Argument">
+      <stringProp name="Argument.name"><VAR_NAME></stringProp>
+      <stringProp name="Argument.value"><HAR_EXTRACTED_DEFAULT></stringProp>
+      <stringProp name="Argument.metadata">=</stringProp>
+      <stringProp name="Argument.desc"><human-readable description></stringProp>
+    </elementProp>
+
+UDV rules:
+    - Default value = exact HAR-extracted value
+    - Auth-adjacent defaults (passwords, secrets, tokens) = "" with note
+      in description field
+    - AUTH_DEFERRED variables → OMIT FROM UDV — Auth Agent will declare them
+    - Argument.desc must state: what it represents, which param/field/path
+      it came from, which entry indexes use it
+
+
+================================================================================
+CSV DATA SET CONFIG
+================================================================================
+
+Add immediately after the UDV <hashTree/> and before the CookieManager.
+Apply classification gate before generating this element.
+
+    <CSVDataSet guiclass="TestBeanGUI" testclass="CSVDataSet"
+      testname="Test Data" enabled="true">
+      <stringProp name="delimiter">,</stringProp>
+      <stringProp name="fileEncoding">UTF-8</stringProp>
+      <stringProp name="filename">testdata.csv</stringProp>
+      <boolProp name="ignoreFirstLine">true</boolProp>
+      <boolProp name="quotedData">true</boolProp>
+      <boolProp name="recycle">true</boolProp>
+      <boolProp name="stopThread">false</boolProp>
+      <stringProp name="variableNames">[CSV_VARIABLES_COMMA_SEPARATED]</stringProp>
+      <boolProp name="shareMode">shareMode.all</boolProp>
+    </CSVDataSet>
+    <hashTree/>
+
+variableNames derivation:
+    1. Collect all parameters classified as CSV from the HAR entries
+    2. Deduplicate by parameter name
+    3. Join with comma separator
+    4. If no CSV-classified parameters exist → omit CSVDataSet element
+       entirely
+    Example: variableNames = "userId,orderId,email,username"
+
+
+================================================================================
+LISTENERS — THREE STANDARD PLAN-LEVEL LISTENERS
+================================================================================
+
+Add the following three listeners at the Test Plan level (inside the outer
+hashTree, after all Thread Groups). These replace any per-Thread-Group
+ResultCollector elements.
+
+--------------------------------------------------------------------------------
+Listener 1 — View Results Tree (disabled by default)
+--------------------------------------------------------------------------------
+
+    <ResultCollector guiclass="ViewResultsFullVisualizer"
+      testclass="ResultCollector" testname="View Results Tree"
+      enabled="false">
+      <boolProp name="ResultCollector.error_logging">false</boolProp>
+      <objProp>
+        <name>saveConfig</name>
+        <value class="SampleSaveConfiguration">
+          <time>true</time><latency>true</latency>
+          <timestamp>true</timestamp><success>true</success>
+          <label>true</label><code>true</code><message>true</message>
+          <threadName>true</threadName><dataType>true</dataType>
+          <encoding>false</encoding><assertions>true</assertions>
+          <subresults>true</subresults><responseData>false</responseData>
+          <samplerData>false</samplerData><xml>false</xml>
+          <fieldNames>true</fieldNames>
+          <responseHeaders>false</responseHeaders>
+          <requestHeaders>false</requestHeaders>
+          <responseDataOnError>true</responseDataOnError>
+          <saveAssertionResultsFailureMessage>true
+            </saveAssertionResultsFailureMessage>
+          <assertionsResultsToSave>0</assertionsResultsToSave>
+          <bytes>true</bytes><sentBytes>true</sentBytes>
+          <url>true</url><threadCounts>true</threadCounts>
+          <idleTime>true</idleTime><connectTime>true</connectTime>
+        </value>
+      </objProp>
+      <stringProp name="filename"></stringProp>
+    </ResultCollector>
+    <hashTree/>
+
+--------------------------------------------------------------------------------
+Listener 2 — Summary Report (enabled)
+--------------------------------------------------------------------------------
+
+    <ResultCollector guiclass="SummaryReport" testclass="ResultCollector"
+      testname="Summary Report" enabled="true">
+      <boolProp name="ResultCollector.error_logging">false</boolProp>
+      <objProp>
+        <name>saveConfig</name>
+        <value class="SampleSaveConfiguration">
+          <time>true</time><latency>true</latency>
+          <timestamp>true</timestamp><success>true</success>
+          <label>true</label><code>true</code><message>true</message>
+          <threadName>true</threadName><dataType>true</dataType>
+          <encoding>false</encoding><assertions>true</assertions>
+          <subresults>true</subresults><responseData>false</responseData>
+          <samplerData>false</samplerData><xml>false</xml>
+          <fieldNames>true</fieldNames>
+          <responseHeaders>false</responseHeaders>
+          <requestHeaders>false</requestHeaders>
+          <responseDataOnError>false</responseDataOnError>
+          <saveAssertionResultsFailureMessage>true
+            </saveAssertionResultsFailureMessage>
+          <assertionsResultsToSave>0</assertionsResultsToSave>
+          <bytes>true</bytes><sentBytes>true</sentBytes>
+          <url>true</url><threadCounts>true</threadCounts>
+          <idleTime>true</idleTime><connectTime>true</connectTime>
+        </value>
+      </objProp>
+      <stringProp name="filename"></stringProp>
+    </ResultCollector>
+    <hashTree/>
+
+--------------------------------------------------------------------------------
+Listener 3 — Aggregate Report (enabled)
+--------------------------------------------------------------------------------
+
+    <ResultCollector guiclass="StatVisualizer" testclass="ResultCollector"
+      testname="Aggregate Report" enabled="true">
+      <boolProp name="ResultCollector.error_logging">false</boolProp>
+      <objProp>
+        <name>saveConfig</name>
+        <value class="SampleSaveConfiguration">
+          <time>true</time><latency>true</latency>
+          <timestamp>true</timestamp><success>true</success>
+          <label>true</label><code>true</code><message>true</message>
+          <threadName>true</threadName><dataType>true</dataType>
+          <encoding>false</encoding><assertions>true</assertions>
+          <subresults>true</subresults><responseData>false</responseData>
+          <samplerData>false</samplerData><xml>false</xml>
+          <fieldNames>true</fieldNames>
+          <responseHeaders>false</responseHeaders>
+          <requestHeaders>false</requestHeaders>
+          <responseDataOnError>false</responseDataOnError>
+          <saveAssertionResultsFailureMessage>true
+            </saveAssertionResultsFailureMessage>
+          <assertionsResultsToSave>0</assertionsResultsToSave>
+          <bytes>true</bytes><sentBytes>true</sentBytes>
+          <url>true</url><threadCounts>true</threadCounts>
+          <idleTime>true</idleTime><connectTime>true</connectTime>
+        </value>
+      </objProp>
+      <stringProp name="filename"></stringProp>
+    </ResultCollector>
+    <hashTree/>
+
+HARD RULE:
+    - View Results Tree must always be enabled="false"
+    - Summary Report and Aggregate Report must always be enabled="true"
+    - Per-Thread-Group ResultCollector elements are NOT used — only these
+      three plan-level listeners
+
+
+================================================================================
+COMPLETE JMX STRUCTURE
+================================================================================
+
+    <?xml version="1.0" encoding="UTF-8"?>
+    <jmeterTestPlan version="1.2" properties="5.0" jmeter="5.6.3">
+      <hashTree>
+        <TestPlan guiclass="TestPlanGui" testclass="TestPlan"
+          testname="<derived> Test Plan" enabled="true">
+          <stringProp name="TestPlan.comments">Generated from HAR capture
+            — Parameterization Agent</stringProp>
+          <boolProp name="TestPlan.functional_mode">false</boolProp>
+          <boolProp name="TestPlan.serialize_threadgroups">false</boolProp>
+          <elementProp name="TestPlan.user_defined_variables"
+            elementType="Arguments">
+            <collectionProp name="Arguments.arguments"/>
+          </elementProp>
+        </TestPlan>
+        <hashTree>
+
+          <!-- README comment block -->
+
+          <!-- UDV Arguments block -->
+          <!-- Order: THREADS/RAMPUP/LOOPS → ENV vars → QUERY vars →
+               BODY vars → PATH ID vars -->
+          <hashTree/>
+
+          <!-- CSVDataSet (only if CSV-classified parameters exist) -->
+          <hashTree/>
+
+          <!-- CookieManager (plan-level, always present) -->
+          <hashTree/>
+
+          <!-- PARAMETERIZATION REPORT comment block -->
+
+          <!-- ═══ T01_Telerik_[APIName] ═══ -->
+          <ThreadGroup testname="T01_Telerik_[APIName]" .../>
+          <hashTree>
+            <!-- All samplers for this context tag group, in entry
+                 index order -->
+            <HTTPSamplerProxy
+              testname="GET ${BASE_PATH}/resource/${RESOURCE_ID}" .../>
+            <hashTree>
+              <HeaderManager .../>              <hashTree/>
+              [<CookieManager .../>             <hashTree/>]
+              <ResponseAssertion status .../>   <hashTree/>
+              [<ResponseAssertion ctype .../>   <hashTree/>]
+              [<JSONPathAssertion .../>         <hashTree/>]
+              <ConstantTimer .../>              <hashTree/>
+            </hashTree>
+            <!-- Additional samplers in same group -->
+          </hashTree>
+
+          <!-- ═══ T02_Telerik_[APIName] ═══ -->
+          <!-- Repeat for each unique context tag group -->
+
+          <!-- ═══ PLAN-LEVEL LISTENERS ═══ -->
+          <ResultCollector testname="View Results Tree"
+            enabled="false" .../>
+          <hashTree/>
+          <ResultCollector testname="Summary Report" enabled="true" .../>
+          <hashTree/>
+          <ResultCollector testname="Aggregate Report" enabled="true" .../>
+          <hashTree/>
+
+        </hashTree>
+      </hashTree>
+    </jmeterTestPlan>
+
+
+================================================================================
+README BLOCK
+================================================================================
+
+Place as the first XML comment inside the inner hashTree, BEFORE the
+UDV block.
+
+    <!--
+    ========================================================================
+    README - Generated JMeter Test Plan (Parameterization Agent v2)
+    ========================================================================
+    PURPOSE:
+      Auto-generated performance test plan from HAR capture.
+      Parameterization pass applied: environment, query, body, and path ID
+      variables. Base JMX structure applied: SC[INT]_Telerik_ naming,
+      grouped Thread Groups, THREADS/RAMPUP/LOOPS controls, CSV Data Set
+      Config, and plan-level listeners. Downstream agents will add:
+      correlation extractors, auth handling, body assertions.
+
+    SOURCE:
+      Generator  : Agent 2 — Parameterization Agent v2 (Base JMX Integrated)
+      HAR file   : <extraction_meta.source_file>
+      Generated  : <ISO 8601 timestamp>
+
+    THREAD GROUPS (<N> groups derived from <M> HAR entries):
+      T01_Telerik_[APIName]  →  <N> samplers  (<list of METHOD PATH>)
+      T02_Telerik_[APIName]  →  <N> samplers  (<list of METHOD PATH>)
+      [one line per Thread Group]
+      [DISABLED entries flagged: ⚠ Entry N — status 0
+       (failed/cancelled request)]
+
+    ENVIRONMENT OVERRIDES (via JMeter CLI -J flags):
+      -JTHREADS=1          (number of virtual users per Thread Group)
+      -JRAMPUP=1           (ramp-up period in seconds)
+      -JLOOPS=1            (number of loop iterations)
+      -JTHINK_TIME=<ms>    (overrides all per-sampler timers when set)
+      -J<VAR_NAME>=<value> (one line per additional environment variable)
+
+    CSV DATA:
+      File     : testdata.csv
+      Variables: <comma-separated CSV variable names, or
+                  "None — no CSV parameters detected">
+
+    PARAMETERIZATION SUMMARY:
+      Thread Groups    : <N> (grouped by path context tag)
+      Environment vars : <N>
+      Query vars       : <N>
+      Body / form vars : <N>
+      Path ID vars     : <N>
+      Auth deferred    : <N>  (Auth Agent will resolve)
+      Assertions added : <N> status code | <N> content-type | <N> JSON body
+      Disabled entries : <N> (status 0 — failed/cancelled in HAR)
+
+    DOWNSTREAM AGENTS REQUIRED:
+      ⚠ <N> auth-deferred header(s)/field(s) — Auth Agent must replace
+        with variables.
+      ⚠ Path ID variable(s) <list> have no confirmed producer in this
+        HAR — Correlation Agent must add extractors.
+      [or "None" if no downstream concerns detected]
+    ========================================================================
+    -->
+
+
+================================================================================
+PARAMETERIZATION REPORT (EMBEDDED XML COMMENT)
+================================================================================
+
+Place immediately after the CookieManager <hashTree/>. Compute all values
+from the data. Omit any section with zero detections.
+
+    <!--
+    ========================================================================
+    PARAMETERIZATION REPORT
+    ========================================================================
+    Generator  : Agent 2 — Parameterization Agent v2 (Base JMX Integrated)
+    HAR file   : <extraction_meta.source_file>
+    Generated  : <ISO 8601 timestamp>
+    Entries    : <total all_entries count>
+
+    THREAD GROUP MAPPING:
+      T01_Telerik_[APIName]  →  entries: <index list>
+      T02_Telerik_[APIName]  →  entries: <index list>
+      [one line per group]
+
+    ENVIRONMENT VARIABLES (<N>):
+      - THREADS      → "1"          [scope: all Thread Groups]
+      - RAMPUP       → "1"          [scope: all Thread Groups]
+      - LOOPS        → "1"          [scope: all Thread Groups]
+      - <VAR_NAME>   → "<default>"  [scope: all samplers]
+
+    [QUERY VARIABLES (<N>):]
+      - <VAR_NAME>  → param "<original_name>" = "<default>"
+        [entries: <indexes>]
+
+    [BODY / FORM VARIABLES (<N>):]
+      - <VAR_NAME>  → field "<key>" = "<default>"
+        [entries: <indexes>]
+
+    [PATH ID VARIABLES (<N>):]
+      - <VAR_NAME>  → path segment "<value>"   [entries: <indexes>]
+
+    CSV DATA SET:
+      Present       : <Yes / No>
+      variableNames : <comma-separated list, or "N/A">
+      Parameters    : <list of CSV-classified param names with defaults>
+
+    HEADERS:
+      Content-Type auto-injected : <N entries, or "None">
+      Auth-deferred headers      : <list of header names, or "None">
+      Tracing headers preserved  : <N distinct names detected>
+      Referer headers with variable substitution applied : <N, or "None">
+
+    ASSERTIONS:
+      Status code  : <N>  (one per non-status-0 entry)
+      Content-type : <N>  (non-null mimeType AND non-3xx status)
+      JSON body    : <N>  (entries where JSON response body is non-null)
+
+    DISABLED THREAD GROUPS:
+      [SC[INT]_Telerik_[APIName] — contains entry N — status 0
+       — reason: failed/cancelled]
+      [or "None"]
+
+    REDIRECT ENTRIES (follow_redirects=false applied):
+      [Entry N — status <3xx> — follow_redirects set to false]
+      [or "None"]
+
+    HARDCODED LITERALS (kept intentionally):
+      Entry <N> — <field> = <value> — reason: <boolean flag /
+        creation placeholder / schema default>
+      [or "None"]
+
+    AUTH DEFERRED:
+      <list of header names or body fields flagged AUTH_DEFERRED,
+       or "None detected">
+
+    WARNINGS:
+      <Agent 2 anomalies — one line each>
+      [Agent 1] <inherited warning from warnings[] — prefix all with
+        "[Agent 1]">
+      [or "None"]
+    ========================================================================
+    -->
+
+
+================================================================================
+XML GENERATION RULES
+================================================================================
+
+    Rule                                   Detail
+    ----                                   ------
+    hashTree after every element           Every JMeter testclass element
+                                           MUST be immediately followed by a
+                                           <hashTree> sibling. Empty
+                                           <hashTree/> is correct and
+                                           required — never omit it.
+    Thread Group nesting                   Thread Groups are siblings — NEVER
+                                           nested inside each other.
+    Indentation                            2-space indentation throughout the
+                                           entire file.
+    Character escaping in text content     & → &amp; | < → &lt; | > → &gt;
+    Character escaping in attributes       " → &quot; in attribute values only
+    & in URL path strings                  All & in URL paths → &amp;
+    Self-closing tags                      Do NOT use self-closing tags for
+                                           elements that have children.
+    No raw values in sampler elements      Protocol, hostname, port, and base
+                                           path must always be variable
+                                           references.
+    collectionProp name on assertions      Always "Assertion.test_strings" —
+                                           the letter t in test must never be
+                                           omitted.
+
+
+================================================================================
+VALIDATION CHECKLIST
+================================================================================
+
+Run mentally before emitting the final XML. Do not output this checklist.
+
+COMPLETENESS
+    [ ] Thread Group count = number of unique context tag groups
+        (not entry count)
+    [ ] Every Thread Group contains all samplers for its context tag
+    [ ] Every entry appears in exactly one Thread Group
+    [ ] Every Thread Group followed by <hashTree> containing all its samplers
+    [ ] Status-0 entries have Thread Group enabled="false" and no status
+        assertion
+
+NAMING CONVENTION
+    [ ] Every Thread Group testname follows SC[INT]_Telerik_[APIName]
+        format
+    [ ] SC[INT] numbers are zero-padded and sequential starting from T01
+    [ ] No two Thread Groups share the same SC[INT] prefix
+    [ ] _Telerik_ fixed segment is present and unmodified in every
+        Thread Group
+
+GROUPING
+    [ ] Entries sharing the same path context tag are inside one Thread Group
+    [ ] No Thread Group contains samplers from different context tags
+
+ENVIRONMENT PARAMETERIZATION
+    [ ] Zero raw hostnames in HTTPSampler.domain
+    [ ] Zero raw protocols in HTTPSampler.protocol
+    [ ] Zero raw ports in HTTPSampler.port
+    [ ] Every sampler path begins with ${BASE_PATH} (or numbered variant)
+
+UDV ADDITIONS
+    [ ] THREADS variable present with default value "1"
+    [ ] RAMPUP variable present with default value "1"
+    [ ] LOOPS variable present with default value "1"
+    [ ] Thread Group references ${THREADS}, ${RAMPUP}
+    [ ] LoopController references ${LOOPS}
+    [ ] UDV group order: THREADS/RAMPUP/LOOPS → ENV → QUERY → BODY → PATH ID
+
+CSV DATA SET
+    [ ] CSVDataSet present if any CSV-classified parameters exist
+    [ ] CSVDataSet omitted if no CSV-classified parameters exist
+    [ ] variableNames lists only CSV-classified parameters
+    [ ] No parameter appears in both UDV and CSVDataSet
+    [ ] CSVDataSet placed after UDV <hashTree/> and before CookieManager
+
+QUERY & BODY PARAMETERIZATION
+    [ ] Every non-boolean, non-constant query param value is a variable
+        reference
+    [ ] Every non-boolean, non-constant body param value is a variable
+        reference
+    [ ] Boolean structural flags kept as literals
+    [ ] Empty string params parameterized with UDV default ""
+
+PATH ID PARAMETERIZATION
+    [ ] Every purely numeric path segment replaced with ${..._ID} variable
+    [ ] Every UUID/hex path segment replaced with appropriate variable
+    [ ] Same value across multiple entries uses one variable — no duplicates
+
+HEADERS
+    [ ] HeaderManager element count = request.headers[] count (+ 1 if
+        Content-Type auto-injected)
+    [ ] Auth-deferred headers carry literal HAR value + <!-- AUTH_DEFERRED -->
+        comment
+    [ ] Tracing headers included verbatim — not parameterized, not flagged
+        as auth
+    [ ] All Referer header values checked for variable substitution
+        (Rule 2.5)
+
+REDIRECT / FOLLOW-REDIRECTS
+    [ ] Every 3xx entry has HTTPSampler.follow_redirects = false
+    [ ] Every non-3xx entry has HTTPSampler.follow_redirects = true
+    [ ] Content-Type assertions omitted for 3xx entries
+
+BODIES
+    [ ] postData.text = "" + empty params[] → no body section
+    [ ] Form bodies: postBodyRaw=false, individual HTTPArgument elements
+    [ ] JSON bodies: postBodyRaw=true, single Argument.value
+
+ASSERTIONS
+    [ ] Every non-status-0 entry has exactly one status code assertion
+    [ ] All collectionProp name attributes on assertions spell
+        "Assertion.test_strings"
+    [ ] Content-type and JSON assertions added only where conditions qualify
+
+COOKIE MANAGER
+    [ ] One plan-level CookieManager present after CSVDataSet <hashTree/>
+    [ ] CookieManager.policy = rfc2109
+    [ ] CookieManager.implementation = HC4CookieHandler
+
+TIMERS
+    [ ] Every entry has exactly one ConstantTimer
+    [ ] All timers use ${__P(THINK_TIME,<N>)} pattern
+    [ ] Timer <N> = timings.wait rounded to integer (fallback chain applied)
+
+LISTENERS
+    [ ] Exactly three plan-level listeners present: View Results Tree,
+        Summary Report, Aggregate Report
+    [ ] View Results Tree enabled="false"
+    [ ] Summary Report enabled="true"
+    [ ] Aggregate Report enabled="true"
+    [ ] All three listeners placed after the last Thread Group, inside the
+        inner hashTree
+    [ ] No per-Thread-Group ResultCollector elements present
+
+XML INTEGRITY
+    [ ] Well-formed XML — no unclosed tags, no mismatched elements
+    [ ] Every testclass element immediately followed by <hashTree> sibling
+    [ ] All & in paths and body text escaped as &amp;
+    [ ] Structure order: README → UDV → CSVDataSet → CookieManager →
+        REPORT → Thread Groups → Listeners
+
+
+================================================================================
+EXPECTED OUTPUT FORMAT
+================================================================================
+
+    First character : "<"  (start of <?xml version="1.0" encoding="UTF-8"?>)
+    Last character  : ">"  (end of </jmeterTestPlan>)
+
+    - Single, complete, valid Apache JMeter .jmx file — nothing else
+    - No prose, markdown, code fences, or commentary outside the XML
+    - All documentation, reports, and warnings live inside the JMX as
+      XML comments
+    - File must load and execute in Apache JMeter 5.6.3 without modification
